@@ -3,17 +3,18 @@
  *
  * Runs N sandboxes in parallel (batch size) for L batches (loops).
  * Each sandbox: install bun -> bun add -g lovdacn -> bunx lovdacn init -> kill.
- * After all sandboxes of a batch are done, wait 20s, then next batch.
+ * After all sandboxes of a batch are done, wait 2s, then next batch.
  *
  * Usage:
  *   E2B_API_KEY=xxx bun run index.ts --batch-size 10 --loops 10
- *   (or run without args and it will ask you)
+ *   (or bun run index.ts --api-key xxx --batch-size 10 --loops 10)
+ *   (or run without args and it will ask you for key, batch size, and loops)
  */
 
 import { Sandbox } from "e2b";
 import { stdin, stdout } from "node:process";
 
-const BATCH_WAIT_MS = 20_000; // wait between batches
+const BATCH_WAIT_MS = 200; // wait between batches
 const SANDBOX_TIMEOUT_MS = 30 * 60_000; // sandbox hard limit
 
 // ---------------------------------------------------------------------------
@@ -140,9 +141,9 @@ const LOVDACN_INIT_CMD =
 // helpers
 // ---------------------------------------------------------------------------
 
-function parseArgs(): { batchSize?: number; loops?: number } {
+function parseArgs(): { batchSize?: number; loops?: number; apiKey?: string } {
   const args = process.argv.slice(2);
-  const out: { batchSize?: number; loops?: number } = {};
+  const out: { batchSize?: number; loops?: number; apiKey?: string } = {};
   for (let i = 0; i < args.length; i++) {
     const val = args[i + 1];
     if ((args[i] === "--batch-size" || args[i] === "-b") && val !== undefined) {
@@ -151,6 +152,9 @@ function parseArgs(): { batchSize?: number; loops?: number } {
     } else if ((args[i] === "--loops" || args[i] === "-l") && val !== undefined) {
       out.loops = parseInt(val, 10);
       i++;
+    } else if ((args[i] === "--api-key" || args[i] === "-k") && val !== undefined) {
+      out.apiKey = val;
+      i++;
     }
   }
   return out;
@@ -158,19 +162,39 @@ function parseArgs(): { batchSize?: number; loops?: number } {
 
 // simple stdin line reader (works interactive & piped)
 let stdinEnded = false;
+const lineQueue: string[] = [];
 let waitingResolve: ((line: string | null) => void) | null = null;
+let inputBuffer = "";
+
 stdin.setEncoding("utf8");
-stdin.on("data", (c: string) => {
-  for (const line of c.split("\n")) {
+stdin.on("data", (chunk: string) => {
+  inputBuffer += chunk;
+  const lines = inputBuffer.split(/\r?\n/);
+  inputBuffer = lines.pop() ?? "";
+  for (const line of lines) {
     if (waitingResolve) {
       const r = waitingResolve;
       waitingResolve = null;
       r(line);
+    } else {
+      lineQueue.push(line);
     }
   }
 });
+
 const onEnd = () => {
   stdinEnded = true;
+  if (inputBuffer.length > 0) {
+    const remaining = inputBuffer;
+    inputBuffer = "";
+    if (waitingResolve) {
+      const r = waitingResolve;
+      waitingResolve = null;
+      r(remaining);
+    } else {
+      lineQueue.push(remaining);
+    }
+  }
   if (waitingResolve) {
     const r = waitingResolve;
     waitingResolve = null;
@@ -181,8 +205,16 @@ stdin.on("end", onEnd);
 stdin.on("close", onEnd);
 
 function nextLine(): Promise<string | null> {
+  if (lineQueue.length > 0) return Promise.resolve(lineQueue.shift()!);
   if (stdinEnded) return Promise.resolve(null);
   return new Promise((resolve) => (waitingResolve = resolve));
+}
+
+async function askText(question: string): Promise<string> {
+  stdout.write(question);
+  const raw = await nextLine();
+  if (raw === null) throw new Error("stdin closed");
+  return raw.trim();
 }
 
 async function askNumber(question: string): Promise<number> {
@@ -196,11 +228,53 @@ async function askNumber(question: string): Promise<number> {
   }
 }
 
+async function resolveApiKey(cliApiKey?: string): Promise<string> {
+  if (cliApiKey && cliApiKey.trim()) {
+    const key = cliApiKey.trim();
+    process.env.E2B_API_KEY = key;
+    log("Using E2B API key from CLI argument (saved in memory).");
+    return key;
+  }
+
+  try {
+    const inputKey = await askText("Enter E2B API key (press Enter to use .env): ");
+    if (inputKey) {
+      process.env.E2B_API_KEY = inputKey;
+      log("Using provided E2B API key (saved in memory).");
+      return inputKey;
+    }
+
+    const envKey = process.env.E2B_API_KEY?.trim();
+    if (envKey) {
+      log("Using E2B API key from .env / environment.");
+      return envKey;
+    }
+
+    while (true) {
+      const fallbackKey = await askText(
+        "E2B API key not found in .env. Paste it here or add it to .env: ",
+      );
+      if (fallbackKey) {
+        process.env.E2B_API_KEY = fallbackKey;
+        log("Using provided E2B API key (saved in memory).");
+        return fallbackKey;
+      }
+      log("E2B API key cannot be empty. Please paste your key or add it to .env.");
+    }
+  } catch (err) {
+    const envKey = process.env.E2B_API_KEY?.trim();
+    if (envKey) {
+      log("Using E2B API key from .env / environment.");
+      return envKey;
+    }
+    throw err;
+  }
+}
+
 async function exitSoon(code: number) {
   await new Promise((r) => setTimeout(r, 150)); // let stdout drain
   process.exit(code);
 }
-
 
 // ---------------------------------------------------------------------------
 // sandbox worker
@@ -254,7 +328,10 @@ async function runInSandbox(batch: number, index: number): Promise<boolean> {
   let sbx: Sandbox | undefined;
   try {
     setStatus(tag, color, "creating sandbox...");
-    sbx = await Sandbox.create({ timeoutMs: SANDBOX_TIMEOUT_MS });
+    sbx = await Sandbox.create({
+      timeoutMs: SANDBOX_TIMEOUT_MS,
+      apiKey: process.env.E2B_API_KEY,
+    });
     activeSandboxes.add(sbx);
 
     // real IP address of the sandbox (public IP), in its own color
@@ -300,27 +377,27 @@ async function runInSandbox(batch: number, index: number): Promise<boolean> {
 }
 
 async function main() {
-  if (!process.env.E2B_API_KEY) {
-    logErr("Missing E2B_API_KEY environment variable.");
-    process.exitCode = 1;
-    return;
-  }
+  let { batchSize, loops, apiKey } = parseArgs();
 
-  let { batchSize, loops } = parseArgs();
   try {
+    await resolveApiKey(apiKey);
     if (batchSize === undefined)
       batchSize = await askNumber("How many parallel sandboxes per batch? ");
     if (loops === undefined)
       loops = await askNumber("How many batch loops should run? ");
-  } catch {
-    logErr("\nNo interactive input. Use: bun run index.ts --batch-size 10 --loops 10");
+  } catch (err) {
+    if (!process.env.E2B_API_KEY) {
+      logErr("\nMissing E2B API key. Please provide it when prompted or in .env.");
+    } else {
+      logErr("\nNo interactive input. Use: bun run index.ts --batch-size 10 --loops 10");
+    }
     process.exitCode = 1;
     return;
   }
 
   log(
     `Plan: ${loops} batch loop(s) x ${batchSize} parallel sandbox(es), ` +
-      `${BATCH_WAIT_MS / 1000}s pause between batches.`,
+    `${BATCH_WAIT_MS / 1000}s pause between batches.`,
   );
 
   for (let batch = 1; batch <= loops; batch++) {
