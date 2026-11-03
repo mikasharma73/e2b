@@ -2,7 +2,7 @@
  * e2b batch runner
  *
  * Runs N sandboxes in parallel (batch size) for L batches (loops).
- * Each sandbox: install bun -> bun add -g lovdacn -> bunx lovdacn init -> kill.
+ * Each sandbox: install bun -> bun add -g lvcn -> bunx lvcn init -> kill.
  * After all sandboxes of a batch are done, wait 2s, then next batch.
  *
  * Usage:
@@ -130,11 +130,11 @@ const INSTALL_BUN_CMD =
   'curl -fsSL https://bun.sh/install | bash > /dev/null 2>&1 && export PATH="$HOME/.bun/bin:$PATH" && bun -v';
 
 const BUN_INSTALL_CMD =
-  'export PATH="$HOME/.bun/bin:$PATH" && bun add -g lovdacn';
+  'export PATH="$HOME/.bun/bin:$PATH" && bun add -g lvcn';
 
-const LOVDACN_INIT_CMD =
+const LVCN_INIT_CMD =
   'export PATH="$HOME/.bun/bin:$PATH" && ' +
-  "bunx lovdacn@latest init --preset aKjNfm --engine nativewind --expo-version 54 " +
+  "bunx lvcn@latest init --preset aKjNfm --engine nativewind --expo-version 54 " +
   "-n my-app -y -f -p bun";
 
 // ---------------------------------------------------------------------------
@@ -347,11 +347,11 @@ async function runInSandbox(batch: number, index: number): Promise<boolean> {
     setStatus(tag, color, "installing bun...");
     await exec(sbx, tag, color, INSTALL_BUN_CMD, 5 * 60_000, { quiet: true, label: "bun" });
 
-    setStatus(tag, color, "installing lovdacn (bun -g)...");
-    await exec(sbx, tag, color, BUN_INSTALL_CMD, 5 * 60_000, { quiet: true, label: "lovdacn" });
+    setStatus(tag, color, "installing lvcn (bun -g)...");
+    await exec(sbx, tag, color, BUN_INSTALL_CMD, 5 * 60_000, { quiet: true, label: "lvcn" });
 
-    setStatus(tag, color, "running lovdacn init (my-app)...");
-    await exec(sbx, tag, color, LOVDACN_INIT_CMD, 15 * 60_000, {
+    setStatus(tag, color, "running lvcn init (my-app)...");
+    await exec(sbx, tag, color, LVCN_INIT_CMD, 15 * 60_000, {
       quiet: true,
       label: "my-app init",
     });
